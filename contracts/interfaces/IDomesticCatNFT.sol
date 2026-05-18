@@ -8,7 +8,11 @@ interface IDomesticCatNFT {
     /// @param nftId The NFT ID being powered up
     /// @param tokenId The AMeow token ID used (burned)
     /// @param newPowerLevel The new power level after increment
-    event NFTPowerUp(uint256 indexed nftId, uint256 indexed tokenId, uint32 newPowerLevel);
+    event NFTPowerUp(
+        uint256 indexed nftId,
+        uint256 indexed tokenId,
+        uint32 newPowerLevel
+    );
 
     /// @notice Emitted when governance updates mint fee
     /// @param oldFee The previous mint fee

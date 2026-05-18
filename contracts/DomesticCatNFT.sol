@@ -1,42 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { ERC721 } from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import { ERC721Enumerable } from "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
-import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
-import { Strings } from "@openzeppelin/contracts/utils/Strings.sol";
-import { AMeowToken } from "./AMeowToken.sol";
-import { CatSVGRegistry } from "./CatSVGRegistry.sol";
-
-/// @title Counters
-/// @notice Library for managing incrementing uint256 values (OZ 5.x compatible replacement)
-library Counters {
-    struct Counter {
-        uint256 _value;
-    }
-
-    function current(Counter storage counter) internal view returns (uint256) {
-        return counter._value;
-    }
-
-    function increment(Counter storage counter) internal {
-        unchecked {
-            counter._value++;
-        }
-    }
-
-    function decrement(Counter storage counter) internal {
-        uint256 value = counter._value;
-        require(value > 0, "Counter: decrement overflow");
-        unchecked {
-            counter._value = value - 1;
-        }
-    }
-
-    function reset(Counter storage counter) internal {
-        counter._value = 0;
-    }
-}
+import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {AMeowToken} from "./AMeowToken.sol";
+import {CatSVGRegistry} from "./CatSVGRegistry.sol";
 
 // ============ Chainlink VRF Minimal Interfaces ============
 
@@ -75,10 +43,7 @@ interface LinkTokenInterface {
 /// @dev Each NFT has a unique SVG generated on-chain based on token ID and power level.
 ///      Power level increases when the NFT receives AMeow tokens, and the SVG evolves accordingly.
 ///      The last NFT minted triggers a Chainlink VRF random draw for the grand prize pool.
-contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
-    using Strings for uint256;
-    using Counters for Counters.Counter;
-
+contract DomesticCatNFT is ERC721, Ownable {
     // ============ Constants ============
     /// @notice Maximum total supply of NFTs
     uint256 public constant MAX_SUPPLY = 10000;
@@ -104,7 +69,7 @@ contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
     address public treasury;
 
     // ============ Counters ============
-    Counters.Counter private _tokenIdCounter;
+    uint256 private _tokenIdCounter;
 
     // ============ NFT Data ============
     /// @notice Power level for each NFT (tokenId => powerLevel, 0-100)
@@ -144,10 +109,18 @@ contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
     event MintFeeUpdated(uint256 oldFee, uint256 newFee);
     event FeeRecipientUpdated(address oldRecipient, address newRecipient);
     event TreasuryUpdated(address oldTreasury, address newTreasury);
-    event NFTPowerUp(uint256 indexed nftId, uint256 tokenId, uint32 newPowerLevel);
+    event NFTPowerUp(
+        uint256 indexed nftId,
+        uint256 tokenId,
+        uint32 newPowerLevel
+    );
     event GrandPrizeRequested(uint256 indexed requestId);
     event GrandPrizeAwarded(uint256 indexed winnerTokenId, uint256 prizeAmount);
-    event ChainlinkConfigUpdated(address vrfCoordinator, uint64 subscriptionId, bytes32 keyHash);
+    event ChainlinkConfigUpdated(
+        address vrfCoordinator,
+        uint64 subscriptionId,
+        bytes32 keyHash
+    );
     event ReceivedTokens(address indexed from, uint256 amount);
 
     // ============ Errors ============
@@ -164,8 +137,14 @@ contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
 
     /// @notice Constructor
     /// @param ameowToken Address of the AMeow token contract
-    constructor(address ameowToken, address svgRegistry) ERC721("DomesticCat", "DCAT") Ownable(msg.sender) {
-        require(ameowToken != address(0) && svgRegistry != address(0), InvalidSVGParams());
+    constructor(
+        address ameowToken,
+        address svgRegistry
+    ) ERC721("DomesticCat", "DCAT") Ownable(msg.sender) {
+        require(
+            ameowToken != address(0) && svgRegistry != address(0),
+            InvalidSVGParams()
+        );
         AMEOW_TOKEN = AMeowToken(ameowToken);
         SVG_REGISTRY = CatSVGRegistry(svgRegistry);
         _mintFee = 0.01 ether;
@@ -271,12 +250,11 @@ contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
     /// @notice Mint a new NFT (caller pays mintFee)
     /// @dev Fee split: portion to treasury, rest stays in contract for grand prize
     function mint() external payable {
-        uint256 currentSupply = _tokenIdCounter.current();
-        if (currentSupply >= MAX_SUPPLY) revert ExceedsMaxSupply();
+        uint256 tokenId = _tokenIdCounter;
+        if (tokenId >= MAX_SUPPLY) revert ExceedsMaxSupply();
         if (msg.value < _mintFee) revert MintFeeNotMet();
 
-        uint256 tokenId = _tokenIdCounter.current();
-        _tokenIdCounter.increment();
+        _tokenIdCounter++;
 
         _safeMint(msg.sender, tokenId);
 
@@ -291,7 +269,7 @@ contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
         // Remaining half stays in contract for grand prize
 
         // If this is the last NFT, trigger grand prize
-        if (_tokenIdCounter.current() == MAX_SUPPLY) {
+        if (_tokenIdCounter == MAX_SUPPLY) {
             _requestRandomWords();
         }
     }
@@ -299,8 +277,8 @@ contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
     /// @notice Batch mint multiple NFTs
     /// @param quantity Number of NFTs to mint
     function batchMint(uint256 quantity) external payable {
-        uint256 currentSupply = _tokenIdCounter.current();
-        uint256 newSupply = currentSupply + quantity;
+        uint256 startId = _tokenIdCounter;
+        uint256 newSupply = startId + quantity;
         if (newSupply > MAX_SUPPLY) revert ExceedsMaxSupply();
 
         uint256 totalFee = _mintFee * quantity;
@@ -311,14 +289,13 @@ contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
         require(sentTreasury, TransferFailed());
 
         for (uint256 i = 0; i < quantity; i++) {
-            uint256 tokenId = _tokenIdCounter.current();
-            _tokenIdCounter.increment();
+            uint256 tokenId = startId + i;
             _safeMint(msg.sender, tokenId);
             nftPowerLevel[tokenId] = 1;
         }
+        _tokenIdCounter = startId + quantity;
 
-        // If last NFT minted, trigger grand prize
-        if (_tokenIdCounter.current() == MAX_SUPPLY) {
+        if (newSupply == MAX_SUPPLY) {
             _requestRandomWords();
         }
     }
@@ -331,7 +308,7 @@ contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
     /// @param tokenAmount Amount of AMeow tokens to use for power-up
     function powerUpNFT(uint256 nftId, uint256 tokenAmount) external {
         require(ownerOf(nftId) == msg.sender, NFTNotOwned());
-        
+
         uint32 currentPower = nftPowerLevel[nftId];
         if (currentPower >= MAX_POWER_LEVEL) revert MaxPowerReached();
 
@@ -388,13 +365,15 @@ contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
     }
 
     function _requestRandomWordsVRFv2() internal returns (bool success) {
-        try VRFCoordinatorV2Interface(vrfCoordinator).requestRandomWords(
-            vrfKeyHash,
-            vrfSubscriptionId,
-            requestConfirmations,
-            callbackGasLimit,
-            1  // numWords
-        ) returns (uint256 requestId) {
+        try
+            VRFCoordinatorV2Interface(vrfCoordinator).requestRandomWords(
+                vrfKeyHash,
+                vrfSubscriptionId,
+                requestConfirmations,
+                callbackGasLimit,
+                1 // numWords
+            )
+        returns (uint256 requestId) {
             _vrfRequestToSender[requestId] = msg.sender;
             emit GrandPrizeRequested(requestId);
             return true;
@@ -404,11 +383,13 @@ contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
     }
 
     function _requestRandomWordsVRFv2_5() internal returns (bool success) {
-        try VRFV2PlusWrapperInterface(vrfWrapper).requestRandomness(
-            callbackGasLimit,
-            requestConfirmations,
-            1  // numWords
-        ) returns (uint256 requestId) {
+        try
+            VRFV2PlusWrapperInterface(vrfWrapper).requestRandomness(
+                callbackGasLimit,
+                requestConfirmations,
+                1 // numWords
+            )
+        returns (uint256 requestId) {
             _vrfRequestToSender[requestId] = msg.sender;
             emit GrandPrizeRequested(requestId);
             return true;
@@ -420,7 +401,10 @@ contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
     /// @notice Callback function called by Chainlink VRF coordinator
     /// @param requestId The VRF request ID
     /// @param randomWords Array of random words
-    function rawFulfillRandomWords(uint256 requestId, uint256[] memory randomWords) external {
+    function rawFulfillRandomWords(
+        uint256 requestId,
+        uint256[] memory randomWords
+    ) external {
         require(
             msg.sender == vrfCoordinator || msg.sender == vrfWrapper,
             "Only VRF coordinator"
@@ -431,9 +415,15 @@ contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
     /// @notice Internal function to fulfill random words and select winner
     /// @param requestId The VRF request ID
     /// @param randomWords Array of random words
-    function _fulfillRandomWords(uint256 requestId, uint256[] memory randomWords) internal {
+    function _fulfillRandomWords(
+        uint256 requestId,
+        uint256[] memory randomWords
+    ) internal {
         if (grandPrizeAwarded) return;
-        require(_vrfRequestToSender[requestId] != address(0), InvalidVRFRequest());
+        require(
+            _vrfRequestToSender[requestId] != address(0),
+            InvalidVRFRequest()
+        );
 
         uint256 randomWord = randomWords[0];
         uint256 prizePool = address(this).balance;
@@ -453,108 +443,42 @@ contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
     // ============ On-Chain SVG Generation ============
 
     /// @notice Get the tokenURI for a given NFT (ERC721 metadata)
-    /// @dev Generates SVG on-chain based on tokenId and power level.
-    ///      SVG contains NO text — all info is in attributes (OpenSea trait standard).
+    /// @dev Delegates to SVG_REGISTRY.buildTokenURI() — single external call,
+    ///      eliminates duplicate base64 + attribute building in main contract.
     /// @param tokenId The NFT token ID
     /// @return Base64 encoded data URL containing SVG and metadata
-    function tokenURI(uint256 tokenId) public view override returns (string memory) {
-        require(ownerOf(tokenId) != address(0), "Not minted");
-
-        uint32 power = nftPowerLevel[tokenId];
-        string memory svg = SVG_REGISTRY.generateSVG(tokenId, 0, 0, 0, 0, power);
-
-        // Visual traits from SVG_REGISTRY
-        string memory bgTrait   = SVG_REGISTRY.getBgTrait(tokenId);
-        string memory bodyTrait = SVG_REGISTRY.getBodyTrait(tokenId);
-        string memory eyeTrait  = SVG_REGISTRY.getEyeTrait(tokenId);
-        string memory patTrait  = SVG_REGISTRY.getPatternTrait(tokenId);
-        string memory auraTrait = SVG_REGISTRY.getAuraTrait(power);
-
-        // Build attributes JSON — OpenSea trait standard
-        // Each trait has trait_type and value; Power is display_type: number
-        string memory attrs = string(
-            abi.encodePacked(
-                '[',
-                // Background
-                '{"trait_type":"Background","value":"', bgTrait, '"},',
-                // Body Color
-                '{"trait_type":"Body Color","value":"', bodyTrait, '"},',
-                // Eye Color
-                '{"trait_type":"Eye Color","value":"', eyeTrait, '"},',
-                // Pattern
-                '{"trait_type":"Pattern","value":"', patTrait, '"},',
-                // Aura
-                '{"trait_type":"Aura","value":"', auraTrait, '"},',
-                // Power Level — numeric display type
-                '{"trait_type":"Power Level","value":', Strings.toString(power),
-                ',"display_type":"number"},',
-                // Max Power — constant
-                '{"trait_type":"Max Power","value":', Strings.toString(MAX_POWER_LEVEL),
-                ',"display_type":"number"},',
-                // AMeow Accumulated — numeric
-                '{"trait_type":"AMeow Accumulated","value":', Strings.toString(nftAccumulatedAMeow[tokenId]),
-                ',"display_type":"number"}',
-                ']'
-            )
-        );
-
-        // Metadata JSON — NO text inside SVG, description references attributes only
-        string memory json = string(
-            abi.encodePacked(
-                '{"name":"DomesticCat #', Strings.toString(tokenId),
-                '","description":"A unique domestic cat NFT. Each cat is generated on-chain, '
-                'features distinct colors, patterns, and evolves as it receives AMeow tokens. '
-                'Every attribute is provably determined by token ID and accumulated power.",',
-                '"image":"data:image/svg+xml;base64,',
-                _base64Encode(bytes(svg)),
-                '","attributes":', attrs, '}'
-            )
-        );
-
-        return string(
-            abi.encodePacked(
-                "data:application/json;base64,",
-                _base64Encode(bytes(json))
-            )
-        );
+    function tokenURI(
+        uint256 tokenId
+    ) public view override returns (string memory) {
+        _requireOwned(tokenId);
+        return
+            SVG_REGISTRY.buildTokenURI(
+                tokenId,
+                nftPowerLevel[tokenId],
+                nftAccumulatedAMeow[tokenId],
+                MAX_POWER_LEVEL
+            );
     }
 
     /// @notice Generate unique SVG based on token ID and power level
-    /// @dev Simplified flat design to stay within EIP-170 bytecode limit.
-    ///      NO TEXT inside SVG — all info is in tokenURI attributes.
+    /// @dev Delegates to SVG_REGISTRY for on-chain SVG generation.
     /// @param tokenId The NFT token ID
     /// @param powerLevel Current power level (0-100)
     /// @return SVG string — pure visual art, zero text
-    // Delegates to SVG_REGISTRY for on-chain SVG generation
-    function _generateSVG(uint256 tokenId, uint32 powerLevel) internal view returns (string memory) {
-        return SVG_REGISTRY.generateSVG(tokenId, 0, 0, 0, 0, powerLevel);
-    }
-
-    // ============ Withdrawal ============
-    function _base64Encode(bytes memory data) internal pure returns (string memory) {
-        if (data.length == 0) return "";
-        bytes memory alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        bytes memory result = new bytes((data.length + 2) / 3 * 4);
-        uint256 index;
-        for (uint256 i = 0; i < data.length; i += 3) {
-            uint256 a = uint8(data[i]);
-            uint256 b = i + 1 < data.length ? uint8(data[i + 1]) : 0;
-            uint256 c = i + 2 < data.length ? uint8(data[i + 2]) : 0;
-            result[index++] = alphabet[a >> 2];
-            result[index++] = alphabet[((a & 3) << 4) | (b >> 4)];
-            result[index++] = i + 1 < data.length ? alphabet[((b & 15) << 2) | (c >> 6)] : bytes1("=");
-            result[index++] = i + 2 < data.length ? alphabet[c & 63] : bytes1("=");
-        }
-        return string(result);
+    function _generateSVG(
+        uint256 tokenId,
+        uint32 powerLevel
+    ) internal view returns (string memory) {
+        return SVG_REGISTRY.generateSVG(tokenId, powerLevel);
     }
 
     // ============ Withdrawal ============
 
     /// @notice Withdraw token accidentally sent to contract
     /// @dev Only withdraws token not reserved for grand prize
-    function withdraw(address token) external onlyOwner { 
+    function withdraw(address token) external onlyOwner {
         uint256 balance;
-        if(token == address(0)) {
+        if (token == address(0)) {
             balance = address(this).balance;
         } else {
             balance = IERC20(token).balanceOf(address(this));
@@ -564,22 +488,9 @@ contract DomesticCatNFT is ERC721, ERC721Enumerable, Ownable {
         require(sent, TransferFailed());
     }
 
-    // ============ ERC721 / ERC721Enumerable Overrides ============
-    function _update(address to, uint256 tokenId, address auth) internal override(ERC721, ERC721Enumerable) returns (address) {
-        return super._update(to, tokenId, auth);
-    }
-
-    function _increaseBalance(address to, uint128 value) internal override(ERC721, ERC721Enumerable) {
-        super._increaseBalance(to, value);
-    }
-
-    function supportsInterface(bytes4 interfaceId) public view override(ERC721, ERC721Enumerable) returns (bool) {
-        return super.supportsInterface(interfaceId);
-    }
-
     // ============ View Functions ============
     function totalMinted() external view returns (uint256) {
-        return _tokenIdCounter.current();
+        return _tokenIdCounter;
     }
 
     function getContractBalance() external view returns (uint256) {
