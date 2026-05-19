@@ -1,0 +1,13 @@
+{
+  "network": "arcTestnet",
+  "chainId": "5042002",
+  "deployer": "0x2500a16266187382173967016afbdabc5572f5bc",
+  "contracts": {
+    "ameowToken": "0xe51d0fb256dd8a0b3c8de1055346a9e98956eb86",
+    "catSVGRegistry": "0x13d4ce8b3166c7d6949396b6a12078732f6f41aa",
+    "domesticCatNFT": "0xa51d913235d7e98ab17c589325013d913ce2692f"
+  },
+  "mintFeeWei": "1000000000000000",
+  "sampleMintHash": "0x57cf3e722f71e93053b4bae8d61f13011d51561759bdd96815fd5c7aafe7e5ac",
+  "deployedAt": "2026-05-19T02:43:07.380Z"
+}
