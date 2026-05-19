@@ -2,12 +2,13 @@
 pragma solidity ^0.8.28;
 
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 
 /// @title AMeowToken
 /// @notice ERC20 token used to power up DomesticCat NFTs
 /// @dev Users transfer AMeow tokens to NFTs to increase their power level.
 ///      The NFT power-up system burns the AMeow tokens sent to it.
-contract AMeowToken is ERC20 {
+contract AMeowToken is ERC20, Ownable {
     /// @notice Maximum total supply of AMeow tokens (1,000,000 AMEOW)
     uint256 public constant MAX_SUPPLY = 1_000_000 * 10 ** 18;
 
@@ -17,19 +18,22 @@ contract AMeowToken is ERC20 {
     /// @notice Emitted when NFT contract address is updated
     event NFTContractUpdated(address indexed oldNFT, address indexed newNFT);
 
+    error NFTContractAlreadySet();
+
     modifier onlyNFTContract() {
         require(msg.sender == domesticCatNFT, "AMeow: caller is not NFT contract");
         _;
     }
 
-    constructor() ERC20("AMeow Token", "AMEOW") {
+    constructor() ERC20("AMeow Token", "AMEOW") Ownable(msg.sender) {
         _mint(msg.sender, MAX_SUPPLY);
     }
 
     /// @notice Set the DomesticCatNFT contract address (one-time setup)
     /// @param nftContract The address of the NFT contract
-    function setNFTContract(address nftContract) external {
+    function setNFTContract(address nftContract) external onlyOwner {
         require(nftContract != address(0), "AMeow: zero address");
+        if (domesticCatNFT != address(0)) revert NFTContractAlreadySet();
         address old = domesticCatNFT;
         domesticCatNFT = nftContract;
         emit NFTContractUpdated(old, nftContract);

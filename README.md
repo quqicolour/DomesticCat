@@ -1,485 +1,323 @@
 # DomesticCat NFT
 
-链上 SVG 生成 NFT 项目 — 10,000 只独一无二的猫咪，基于 Hardhat 3 + Solidity 0.8.28 + viem 2.x。
+DomesticCat 是一个全链上 SVG NFT 项目：10,000 只猫咪由 `tokenId` 确定性生成外观，持有人可以燃烧 `AMeowToken` 提升 NFT power，`tokenURI` 会实时反映 power、光环和累计 AMEOW。
 
-每只猫咪的外观由 tokenId 纯链上生成（keccak256 决定颜色/花纹），猫咪持有者可通过充入 AMeow Token 提升 power 等级，SVG 外观随之进化。当第 10,000 只 NFT 被 mint 时，奖金池（所有 mint 费用的 50%）通过 Chainlink VRF 随机分配给中奖猫咪的持有者。
-
----
-
-## 目录
-
-- [快速开始](#快速开始)
-- [项目架构](#项目架构)
-- [合约详解](#合约详解)
-- [部署指南](#部署指南)
-- [合约交互](#合约交互)
-- [SVG 视觉系统](#svg-视觉系统)
-- [Chainlink VRF 配置](#chainlink-vrf-配置)
-- [脚本说明](#脚本说明)
-- [测试](#测试)
-- [目录结构](#目录结构)
-
----
+技术栈：Hardhat 3、Solidity 0.8.28、OpenZeppelin 5、viem 2、Node.js `node:test`。
 
 ## 快速开始
 
-### 安装依赖
-
 ```bash
 npm install
+npm run compile
+npm test
 ```
 
-### 本地网络部署（一步到位）
+本地完整部署：
 
 ```bash
-npx hardhat run scripts/deploy-full.ts
+npm run deploy
 ```
 
-### 运行测试
+交互式工具：
 
 ```bash
-npx hardhat test                 # 所有测试
-npx hardhat test nodejs         # 仅 node:test 测试
+npm run interactive
 ```
 
-### 编译合约
+部署到 Base Sepolia：
 
 ```bash
-npx hardhat compile
+npx hardhat run scripts/deploy-full.ts --network baseSepolia
 ```
 
----
+需要在 `.env` 中配置：
+
+```bash
+SEPOLIA_RPC_URL=https://...
+PRIVATE_KEY=0x...
+```
 
 ## 项目架构
 
-### 技术栈
-
-| 类别 | 技术 |
-|------|------|
-| 智能合约 | Hardhat 3 + Solidity 0.8.28 |
-| 合约交互 | viem 2.x |
-| 测试框架 | Node.js `node:test` |
-| 部署 | Hardhat Ignition |
-| 依赖库 | OpenZeppelin Contracts 5.6.1 |
-
-### 合约架构
-
-```
-AMeowToken (ERC20) ──burnFrom()──► DomesticCatNFT (ERC721)
-      │                                      │
-      │ setNFTContract()                     │ tokenURI()
-      │                                      ▼
-      │                            CatSVGRegistry (纯函数)
-      │                                      │
-      └──────────────────────────────────────┘
+```text
+AMeowToken (ERC20, Ownable)
+  | setNFTContract(DomesticCatNFT)  owner-only, one-time
+  | burnFrom()                      only DomesticCatNFT
+  v
+DomesticCatNFT (ERC721, Ownable)
+  | mint / batchMint
+  | powerUpNFT -> transferFrom AMEOW -> burnFrom
+  | tokenURI
+  v
+CatSVGRegistry (pure on-chain SVG + metadata renderer)
 ```
 
-**部署顺序**：
+部署顺序固定：
+
 1. 部署 `AMeowToken`
-2. 部署 `DomesticCatNFT`（传入 AMeowToken 地址）
-3. 调用 `ameowToken.setNFTContract(nftAddress)` 完成双向绑定
+2. 部署 `CatSVGRegistry`
+3. 部署 `DomesticCatNFT(ameowToken, svgRegistry)`
+4. 调用 `AMeowToken.setNFTContract(nftAddress)`
 
----
+`AMeowToken.setNFTContract` 只能由 owner 调用，且只能成功一次，避免后续恶意替换燃烧权限。
 
-## 合约详解
+## 合约说明
 
-### 1. AMeowToken.sol
+### AMeowToken
 
-标准 ERC20，总量 100 万枚。
+`contracts/AMeowToken.sol`
 
-- `MAX_SUPPLY = 1_000_000 * 10^18`
-- `setNFTContract()` — 一次性设置 NFT 合约地址
-- `burnFrom(from, amount)` — 仅可由 NFT 合约调用，power-up 时燃烧 token
+- ERC20 名称：`AMeow Token`
+- Symbol：`AMEOW`
+- 固定总量：`1,000,000 * 10^18`
+- 初始供应全部 mint 给部署者
+- `burnFrom(address,uint256)` 只能由已绑定的 NFT 合约调用
 
-### 2. DomesticCatNFT.sol
+核心方法：
 
-主 NFT 合约（ERC721），核心参数：
-
-| 常量 | 值 | 说明 |
-|------|----|------|
-| `MAX_SUPPLY` | 10,000 | 最大发行量 |
-| `MAX_POWER_LEVEL` | 100 | 最大 power 等级 |
-| `AMEOW_PER_POWER` | 10 * 10^18 | 每 10 AMEOW 提升 1 power |
-| `MINT_FEE` | 0.01 ether | 默认 mint 费用 |
-
-**费用分拆**：每次 mint，50% 打入 treasury，50% 留在合约作为大奖池。
-
-**Power 进化**：
-
-| Power 等级 | Aura 光环 | 胸口徽章 |
-|------------|-----------|---------|
-| 1–5 | 无 | 无 |
-| 6–20 | Soft Silver | 小灰球 |
-| 21–50 | Ethereal Cyan | 中青球 |
-| 51–80 | Mystic Purple | 大紫球 |
-| 81–100 | Legendary Gold | 超大金球 + 双层光环 |
-
-**Chainlink VRF**：第 10,000 只 NFT mint 时自动触发，`randomWords[0] % 10000` 选出中奖 tokenId，奖金池全部转入中奖者。
-
-### 3. CatSVGRegistry.sol
-
-链上 SVG 生成引擎，所有方法 `pure`，零 storage 读取。
-
-- 颜色通过 `keccak256(tokenId, tag)` 确定性生成（RGB 范围 [50, 254]）
-- `buildTokenURI()` — 生成 base64-encoded JSON（含 SVG + metadata）
-- SVG 拼接分块（aura、pattern、tail、whiskers 等），解决 stack-too-deep 问题
-
-### 4. CatSVGLib.sol
-
-纯函数工具库，从主合约分离以降低字节码体积（避免超过 EIP-170 的 24576 字节限制）。
-
----
-
-## 部署指南
-
-### 方式一：完整部署脚本（推荐）
-
-```bash
-# 1. 部署到本地网络
-npx hardhat run scripts/deploy-full.ts
-
-# 2. 部署到 Sepolia（需配置环境变量）
-export SEPOLIA_RPC_URL=https://sepolia.infura.io/v3/YOUR_KEY
-export SEPOLIA_PRIVATE_KEY=0xYourPrivateKey
-npx hardhat run scripts/deploy-full.ts --network sepolia
+```solidity
+setNFTContract(address nftContract)
+burnFrom(address from, uint256 amount)
+remainingSupply()
 ```
 
-部署脚本自动完成：
-- 部署 AMeowToken
-- 部署 DomesticCatNFT
-- 调用 `setNFTContract` 完成绑定
-- 验证合约关键数据
-- Mint NFT #0 验证 SVG 生成
-- 保存 `.env.deployed` 配置文件
+### DomesticCatNFT
 
-### 方式二：交互式部署
+`contracts/DomesticCatNFT.sol`
 
-```bash
-npx hardhat run scripts/deploy-interactive.ts
-# 选择操作：完整部署 / 仅部署 / Mint / VRF 配置 / 查询状态
+- ERC721 名称：`DomesticCat`
+- Symbol：`DCAT`
+- 最大供应：`10,000`
+- 默认 mint fee：`0.001 ETH`
+- 默认 power：`1`
+- 最大 power：`100`
+- 每 `10 AMEOW` 提升 `1` power
+
+Mint 费用分配：
+
+- 50% 转入 `treasury`
+- 50% 留在 NFT 合约中作为大奖池余额
+
+Power-up 流程：
+
+1. 持有人先 `AMeowToken.approve(nftAddress, amount)`
+2. 调用 `DomesticCatNFT.powerUpNFT(tokenId, amount)`
+3. NFT 合约把 AMEOW 从用户转入自身
+4. NFT 合约调用 `AMeowToken.burnFrom(address(this), amount)`
+5. `nftPowerLevel[tokenId]` 增加，最高封顶 100
+
+### CatSVGRegistry
+
+`contracts/CatSVGRegistry.sol`
+
+负责生成 SVG 和 ERC721 metadata：
+
+- `generateSVG(tokenId, power)`
+- `buildTokenURI(tokenId, power, accumulatedAMeow, maxPower)`
+- trait getter：背景、身体、眼睛、花纹、光环
+
+它不保存 storage，渲染结果由 `tokenId` 和 `power` 确定。`tokenURI` 返回 `data:application/json;base64,...`，其中 `image` 是 `data:image/svg+xml;base64,...`。
+
+## SVG 和属性系统
+
+猫咪视觉由两类输入组成：
+
+- `tokenId`：决定背景、身体、眼睛、花纹和颜色种子
+- `power`：决定光环和胸口徽章
+
+Power 分层：
+
+| Power | Aura |
+| --- | --- |
+| 0-5 | None |
+| 6-20 | Soft Silver |
+| 21-50 | Ethereal Cyan |
+| 51-80 | Mystic Purple |
+| 81-100 | Legendary Gold |
+
+Metadata attributes 包含：
+
+- `Background`
+- `Body Color`
+- `Eye Color`
+- `Pattern`
+- `Aura`
+- `Power Level`
+- `Max Power`
+- `AMeow Accumulated`
+
+## 大奖池机制
+
+当第 10,000 只 NFT 被 mint 时，合约记录 `lastRandomBlock = block.number` 并发出 `GrandPrizeRequested`。
+
+之后任意人都可以在触发区块被确认后调用：
+
+```solidity
+getWinningTokenId()
 ```
 
-### 方式三：Hardhat Ignition
+合约会组合以下熵源：
 
-```bash
-# 本地网络
-npx hardhat ignition deploy ignition/modules/Deploy.ts
+- `_recentBlockHashes` 的 10 槽 XOR
+- `blockhash(lastRandomBlock)`
+- 当前合约 ETH 余额
+- `block.gaslimit`
+- 上一次 `winningTokenId`
 
-# Sepolia
-npx hardhat ignition deploy --network sepolia ignition/modules/Deploy.ts
+计算：
+
+```text
+winningTokenId = entropy % 10000
 ```
 
-### Sepolia 部署环境变量
+随后合约会把当前 ETH 余额转给 `ownerOf(winningTokenId)`，并发出 `GrandPrizeAwarded(winnerTokenId, prizeAmount)`。
+
+注意：这是链上 blockhash 随机方案，不等同于 Chainlink VRF。面向高价值主网奖池时，建议升级为 VRF 或 commit-reveal。
+
+## 部署脚本
+
+### scripts/deploy-full.ts
+
+完整部署、绑定、校验，并默认 mint 示例 NFT #0。
 
 ```bash
-export SEPOLIA_RPC_URL=https://sepolia.infura.io/v3/YOUR_KEY
-export SEPOLIA_PRIVATE_KEY=0xYourPrivateKey
+npm run deploy
+npx hardhat run scripts/deploy-full.ts --network baseSepolia
 ```
 
-或使用 Hardhat Keystore：
+跳过示例 mint：
 
 ```bash
-npx hardhat keystore set SEPOLIA_PRIVATE_KEY
-npx hardhat keystore set SEPOLIA_RPC_URL
+SKIP_SAMPLE_MINT=true npm run deploy
 ```
 
-### 部署后必做
+脚本输出：
 
-1. 记录 `AMEOW_TOKEN_ADDRESS` 和 `NFT_CONTRACT_ADDRESS`
-2. 在 [Chainlink VRF](https://vrf.chain.link/sepolia) 创建订阅
-3. 订阅充值 LINK（建议 ≥2 LINK）
-4. 将 NFT 合约添加为 Consumer
-5. 配置 VRF：`npx hardhat run scripts/configure-vrf.ts --network sepolia`
-6. 分发 AMEOW Token 给用户用于 power-up
+- `.env.deployed`
+- `deployments/<network>-<chainId>.json`
 
----
+`.env.deployed` 示例：
 
-## 合约交互
+```bash
+NETWORK=default
+CHAIN_ID=31337
+AMEOW_TOKEN_ADDRESS=0x...
+SVG_REGISTRY_ADDRESS=0x...
+NFT_CONTRACT_ADDRESS=0x...
+DEPLOYER=0x...
+MINT_FEE=1000000000000000
+```
 
-### Mint NFT
+### scripts/interactive.ts
 
-```typescript
-import { createWalletClient, http, encodeFunctionData } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+交互式工具支持：
 
-const account = privateKeyToAccount("0x" + PK);
-const client = createWalletClient({
-  account,
-  transport: http("https://sepolia.infura.io/v3/YOUR_KEY"),
+- 部署全部合约
+- 查询状态
+- mint / batchMint
+- power-up
+- 读取 tokenURI
+- finalize grand prize
+- owner 提取 ETH
+
+```bash
+npm run interactive
+```
+
+## 常用交互
+
+### Mint
+
+```ts
+const hash = await nft.write.mint({
+  client: { wallet },
+  value: 1_000_000_000_000_000n,
 });
-
-const mintFee = 10_000_000_000_000_000n; // 0.01 ETH
-const txHash = await client.writeContract({
-  address: NFT_ADDRESS,
-  abi: [...], // DomesticCatNFT ABI
-  functionName: "mint",
-  value: mintFee,
-});
+await publicClient.waitForTransactionReceipt({ hash });
 ```
 
-### 批量 Mint
+### Batch Mint
 
-```typescript
+```ts
 const quantity = 5n;
+const fee = await nft.read.getMintFee();
 await nft.write.batchMint([quantity], {
-  account: userAddress,
-  value: mintFee * quantity,
+  client: { wallet },
+  value: fee * quantity,
 });
 ```
 
-### Power-Up（提升 NFT 等级）
+### Power-up
 
-```typescript
-// 1. 授权 NFT 合约使用你的 AMEOW
-await ameowToken.write.approve([nftAddress, amount], {
-  account: userAddress,
+```ts
+const amount = parseEther("50"); // 50 AMEOW = +5 power
+
+await ameow.write.approve([nft.address, amount], {
+  client: { wallet },
 });
 
-// 2. 调用 power-up（每 10 AMEOW 提升 1 power）
-await nft.write.powerUpNFT([tokenId, amount], {
-  account: userAddress,
+await nft.write.powerUpNFT([0n, amount], {
+  client: { wallet },
 });
 ```
 
-### 读取 tokenURI
+### Decode tokenURI
 
-```typescript
-const uri = (await nft.read.tokenURI([tokenId])) as string;
-// uri 格式: data:application/json;base64,{base64(JSON)}
-// JSON.image: data:image/svg+xml;base64,{base64(SVG)}
+```ts
+const uri = await nft.read.tokenURI([0n]);
+const json = JSON.parse(
+  Buffer.from(uri.replace("data:application/json;base64,", ""), "base64").toString("utf8"),
+);
 ```
-
-### 查询 Power 等级
-
-```typescript
-const power = await nft.read.getNFTPowerLevel([tokenId]);
-```
-
-### 治理操作（仅 Owner）
-
-```typescript
-// 修改 mint 费用
-await nft.write.setMintFee([newFee], { account: owner });
-
-// 修改费用接收地址
-await nft.write.setFeeRecipient([newRecipient], { account: owner });
-
-// 修改国库地址
-await nft.write.setTreasury([newTreasury], { account: owner });
-```
-
----
-
-## SVG 视觉系统
-
-### 属性决定表
-
-所有视觉属性由 tokenId 纯算决定（确定性，无链上随机源）：
-
-| 属性 | 取值数量 | 决定方式 |
-|------|---------|---------|
-| 背景主题 | 12 种 | `tokenId % 12` |
-| 身体颜色 | 16 种 | `keccak256(tokenId, 0x10)` → RGB 映射 |
-| 眼睛虹膜 | 12 种 | `keccak256(tokenId, 0x13)` → RGB 映射 |
-| 花纹类型 | 7 种 | `tokenId % 7` |
-| Aura 光环 | 5 级 | 由 power 等级决定 |
-
-### 花纹类型
-
-| Index | 名称 | 视觉效果 |
-|-------|------|---------|
-| 0 | Tiger Stripes | 三道弧形条纹 |
-| 1 | Spotted | 5 个圆点散布 |
-| 2 | Heart Mark | 额头心形 |
-| 3 | Marble Swirls | 两道波浪线 |
-| 4 | Star Marked | 3 个光点 |
-| 5 | Dotted | 5 个小圆点 |
-| 6 | Solid | 纯色无花纹 |
-
-### SVG 结构
-
-```
-<svg viewBox="0 0 400 400">
-  ├── 背景层（背景色 + 半透明叠加 + 星星）
-  ├── Aura 光环（power 6+ 显现，颜色随等级变化）
-  ├── 身体（椭圆形猫身 + 阴影）
-  ├── 花纹层（7 种图案之一）
-  ├── 四肢（椭圆形爪子 + 尾巴）
-  ├── 头部（圆形 + 腮部阴影）
-  ├── 耳朵（三角形 + 内耳）
-  ├── 眼睛（白底 + 虹膜 + 瞳孔 + 高光）
-  ├── 鼻子 + 嘴巴 + 6 根胡须
-  ├── 胸口徽章（power 6+ 显现，大小随等级变化）
-  └── </svg>
-```
-
----
-
-## Chainlink VRF 配置
-
-### 工作原理
-
-```
-mint() → _tokenIdCounter == 10000 → _requestRandomWords()
-                                         │
-                    ┌────────────────────┴────────────────────┐
-                 VRF v2                                     VRF v2.5
-            (Ethereum)                                  (BSC/Polygon L2)
-                                         │
-                              VRF Coordinator 返回 requestId
-                                         │
-                              链下生成随机数，调用 rawFulfillRandomWords()
-                                         │
-                              winningTokenId = randomWords[0] % 10000
-                                         │
-                              (address(this).balance) → winner
-```
-
-### VRF v2 配置（Ethereum Sepolia）
-
-```bash
-export VRF_SUBSCRIPTION_ID=your_subscription_id
-export VRF_KEY_HASH=your_key_hash
-npx hardhat run scripts/configure-vrf.ts --network sepolia
-```
-
-### VRF v2.5 配置（BSC/Polygon）
-
-```bash
-export VRF_SUBSCRIPTION_ID=your_subscription_id
-export VRF_KEY_HASH=your_key_hash
-export VRF_WRAPPER_ADDRESS=your_wrapper_address
-npx hardhat run scripts/configure-vrf.ts --network bsc
-```
-
-### 重要提示
-
-> ⚠️ 如果在第 10,000 只 NFT mint 时 VRF 未配置（`vrfCoordinator == address(0)`），交易会 revert，大奖无法发放。建议在 mint 达到 9,000+ 后确认 VRF 已正确配置。
-
----
-
-## 脚本说明
-
-| 脚本 | 说明 |
-|------|------|
-| `scripts/deploy-full.ts` | 完整部署：部署 + 绑定 + 验证 + mint + SVG 输出 |
-| `scripts/deploy-interactive.ts` | 交互式菜单：支持部署/mint/查询/VRF配置 |
-| `scripts/configure-vrf.ts` | Chainlink VRF 配置脚本 |
-| `scripts/deploy-and-mint.ts` | 原始部署脚本（功能同 deploy-full） |
-| `ignition/modules/Deploy.ts` | Hardhat Ignition 部署模块 |
-
-### deploy-full.ts 输出示例
-
-```
-============================================================
-  DomesticCat NFT — 完整部署脚本
-============================================================
-  网络       : sepolia
-  部署者     : 0x...
-  时间       : 2025-01-01T00:00:00.000Z
-============================================================
-
-[Step 1/6] 部署 AMeowToken...
-  ✓ AMeowToken 部署完成: 0x...
-
-[Step 2/6] 部署 DomesticCatNFT...
-  ✓ DomesticCatNFT 部署完成: 0x...
-
-[Step 3/6] 双向绑定 (setNFTContract)...
-  ✓ 绑定完成: 0x...
-
-[Step 4/6] 验证合约数据...
-  ✓ 所有验证通过
-
-[Step 5/6] Mint NFT #0...
-  ✓ Mint 成功: 0x...
-
-[Step 6/6] 读取 tokenURI 并解码...
-  name        : DomesticCat #0
-  - Background: Midnight
-  - Body Color: Light Pink
-  - Eye Color: Royal Blue
-  - Pattern: Tiger Stripes
-  - Aura: None
-  - Power Level: 1
-
-✅ 部署完成！
-```
-
----
 
 ## 测试
 
-### 运行所有测试
+测试位于 `test/`，使用 Hardhat 3 + viem + Node.js `node:test`。
 
 ```bash
-npx hardhat test
+npm test
+npx hardhat test test/AMeowToken.test.ts
+npx hardhat test test/CatSVGRegistry.test.ts
+npx hardhat test test/DomesticCat.test.ts
 ```
 
-### 测试覆盖范围
+覆盖范围：
 
-| 模块 | 测试内容 |
-|------|---------|
-| AMeowToken | 初始供给、转账、授权、burnFrom |
-| Governance | mintFee/feeRecipient/treasury 设置、权限控制 |
-| NFT Minting | 单笔 mint、批量 mint、费用分拆、revert 条件 |
-| Power-Up | 升级计算、AMEOW 燃烧、power 上限、非 owner 拒绝 |
-| TokenURI/SVG | base64 格式、JSON 结构、SVG 有效性、uniqueness |
-| Chainlink VRF | VRF 配置、callback gas limit、确认数 |
-| Withdrawal | ETH 提取 |
-
----
+| 文件 | 覆盖内容 |
+| --- | --- |
+| `AMeowToken.test.ts` | ERC20 元数据、固定供应、转账、授权、NFT 绑定权限、burnFrom 权限 |
+| `CatSVGRegistry.test.ts` | trait getter、power aura 分层、SVG 完整性、metadata base64 解码 |
+| `DomesticCat.test.ts` | 部署参数、mint、batchMint、费用分配、ERC721 授权、power-up、治理、提现、tokenURI |
 
 ## 目录结构
 
-```
-DomesticCat/
-├── contracts/
-│   ├── DomesticCatNFT.sol       # 主 NFT 合约（ERC721）
-│   ├── AMeowToken.sol           # ERC20 能量 Token
-│   ├── CatSVGRegistry.sol       # 链上 SVG 生成引擎
-│   ├── CatSVGLib.sol            # SVG 纯函数库
-│   └── interfaces/
-│       └── IDomesticCatNFT.sol  # 接口定义
-├── ignition/modules/
-│   └── Deploy.ts                # Hardhat Ignition 部署模块
-├── scripts/
-│   ├── deploy-full.ts           # 完整部署脚本（推荐）
-│   ├── deploy-interactive.ts    # 交互式部署工具
-│   ├── configure-vrf.ts         # Chainlink VRF 配置
-│   └── deploy-and-mint.ts       # 原始部署脚本
-├── test/
-│   ├── DomesticCat.test.ts      # 主测试套件
-│   ├── CatSVGRegistry.test.ts   # SVG 专项测试
-│   ├── debug.test.ts            # 调试测试
-│   ├── debug2.test.ts           # 调试测试
-│   └── minimal.test.ts          # 最小用例测试
-├── docs/
-│   ├── README_zh.md             # 中文使用文档
-│   └── ARCHITECTURE_zh.md       # 架构详解
-├── hardhat.config.ts
-├── package.json
-├── tsconfig.json
-├── output_nft0.svg              # 部署后生成的示例 SVG
-└── .env.deployed                # 部署后生成的配置（gitignore）
+```text
+contracts/
+  AMeowToken.sol
+  CatSVGRegistry.sol
+  DomesticCatNFT.sol
+  interfaces/IDomesticCatNFT.sol
+  libraries/CatSVGLib.sol
+ignition/modules/
+  Deploy.ts
+scripts/
+  deploy-full.ts
+  env.ts
+  interactive.ts
+test/
+  AMeowToken.test.ts
+  CatSVGRegistry.test.ts
+  DomesticCat.test.ts
+  helpers.ts
+hardhat.config.ts
+package.json
+README.md
 ```
 
----
+## 安全和实现备注
 
-## 常见问题
-
-**Q: 为什么 CatSVGRegistry 单独作为一个合约？**
-
-A: DomesticCatNFT 主合约字节码接近 EIP-170 的 24576 字节限制。将 SVG 生成逻辑分离为独立合约（CatSVGRegistry），主合约通过 external call 委托 SVG 构建，可有效控制字节码体积。
-
-**Q: CatSVGRegistry 的方法为什么都是 `pure`？**
-
-A: `pure` 方法不读取 storage，节省 SLOAD gas。所有颜色和属性由 `keccak256(tokenId, tag)` 纯函数计算，无状态依赖。
-
-**Q: power-up 燃烧的 AMEOW 去了哪里？**
-
-A: `powerUpNFT` 先将 AMEOW 从用户转入 NFT 合约，再调用 `AMeowToken.burnFrom(nftContract, amount)` 将其燃烧。AMEOW 总供给相应减少。
-
-**Q: 如何在 BSC/Polygon 等 L2 部署？**
-
-A: 在 `hardhat.config.ts` 添加 L2 网络配置（RPC URL + chainType: "l2"），使用 VRF v2.5 版本调用 `configureVRFv2_5()`。BSC 使用 VRF Wrapper 地址替代原生 Coordinator。
+- `AMeowToken.setNFTContract` 是 owner-only 且一次性，保护 AMEOW 燃烧入口。
+- `powerUpNFT` 要求调用者是 NFT 当前 owner。
+- `tokenURI` 完全链上生成，无 IPFS 或中心化图片依赖。
+- `withdraw(address token)` 当前 ETH 分支用于 owner 提取合约 ETH；如需提取误转 ERC20，建议补充独立 ERC20 transfer 分支测试后再用于生产。
+- `IDomesticCatNFT.sol` 中仍保留了早期 VRF 命名说明，实际实现使用 blockhash。

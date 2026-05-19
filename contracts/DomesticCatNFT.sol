@@ -6,43 +6,13 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {AMeowToken} from "./AMeowToken.sol";
 import {CatSVGRegistry} from "./CatSVGRegistry.sol";
 
-// ============ Chainlink VRF Minimal Interfaces ============
-
-/// @notice VRF Coordinator v2 interface
-interface VRFCoordinatorV2Interface {
-    function requestRandomWords(
-        bytes32 keyHash,
-        uint64 subId,
-        uint16 minConfirmations,
-        uint32 callbackGasLimit,
-        uint32 numWords
-    ) external returns (uint256 requestId);
-}
-
-/// @notice VRF v2.5 Wrapper interface (used on L2s like Optimism, Arbitrum)
-interface VRFV2PlusWrapperInterface {
-    function requestRandomness(
-        uint32 callbackGasLimit,
-        uint16 requestConfirmations,
-        uint32 numWords
-    ) external returns (uint256 requestId);
-}
-
-/// @notice LINK token interface
-interface LinkTokenInterface {
-    function transferAndCall(
-        address to,
-        uint256 value,
-        bytes calldata data
-    ) external returns (bool success);
-    function balanceOf(address account) external view returns (uint256);
-}
-
 /// @title DomesticCatNFT
-/// @notice Unique SVG-based NFT collection of 10,000 cats with power-up system and Chainlink grand prize
+/// @notice Unique SVG-based NFT collection of 10,000 cats with power-up system and on-chain grand prize.
 /// @dev Each NFT has a unique SVG generated on-chain based on token ID and power level.
 ///      Power level increases when the NFT receives AMeow tokens, and the SVG evolves accordingly.
-///      The last NFT minted triggers a Chainlink VRF random draw for the grand prize pool.
+///      The last NFT minted triggers a block-hash-based random draw for the grand prize pool.
+///      Randomness is derived from the XOR of the last 10 block hashes after mint closes,
+///      mixed with the contract balance and the previous winning token ID for added entropy.
 contract DomesticCatNFT is ERC721, Ownable {
     // ============ Constants ============
     /// @notice Maximum total supply of NFTs
@@ -51,8 +21,8 @@ contract DomesticCatNFT is ERC721, Ownable {
     /// @notice Maximum power level an NFT can reach (100)
     uint32 public constant MAX_POWER_LEVEL = 100;
 
-    /// @notice Amount of AMeow tokens required per power-up increment
-    uint256 public constant AMEOW_PER_POWER = 10 * 10 ** 18; // 10 AMEOW per power increment
+    /// @notice Amount of AMeow tokens required per power-up increment (10 AMEOW)
+    uint256 public constant AMEOW_PER_POWER = 10 * 10 ** 18;
 
     // ============ Immutable Storage ============
     /// @notice Address of the AMeow token contract
@@ -78,32 +48,21 @@ contract DomesticCatNFT is ERC721, Ownable {
     /// @notice Accumulated AMeow tokens received by each NFT
     mapping(uint256 => uint256) public nftAccumulatedAMeow;
 
-    // ============ Grand Prize (Chainlink VRF) ============
+    // ============ Grand Prize (Block-Hash Randomness) ============
     /// @notice Flag indicating if grand prize has been awarded
     bool public grandPrizeAwarded;
     /// @notice The winning token ID
     uint256 public winningTokenId;
-    /// @notice Chainlink VRF request ID => original requester address
-    mapping(uint256 => address) private _vrfRequestToSender;
-    /// @notice Chainlink VRF callback gas limit
-    uint32 public callbackGasLimit = 100000;
-    /// @notice Chainlink VRF request confirmations
-    uint16 public requestConfirmations = 3;
 
-    // VRF v2 configuration (Ethereum mainnet/Goerli)
-    /// @notice Chainlink VRF Coordinator address
-    address public vrfCoordinator;
-    /// @notice Chainlink VRF subscription ID
-    uint64 public vrfSubscriptionId;
-    /// @notice Chainlink VRF wrapper address
-    address public vrfWrapper;
-    /// @notice LINK token address
-    address public linkToken;
+    /// @notice Fixed-size circular buffer of the last 10 block hashes used for randomness.
+    ///         Updated sequentially; each new draw appends the next block hash.
+    bytes32[10] private _recentBlockHashes;
 
-    // Alternative VRF v2.5 configuration
-    /// @notice Whether using VRF v2.5
-    bool public useVRFV2_5;
-    bytes32 public vrfKeyHash;
+    /// @notice Index (0-9) of the next slot in _recentBlockHashes to overwrite
+    uint8 private _blockHashIndex;
+
+    /// @notice Block number at which the last random draw was finalised
+    uint256 public lastRandomBlock;
 
     // ============ Events ============
     event MintFeeUpdated(uint256 oldFee, uint256 newFee);
@@ -116,11 +75,6 @@ contract DomesticCatNFT is ERC721, Ownable {
     );
     event GrandPrizeRequested(uint256 indexed requestId);
     event GrandPrizeAwarded(uint256 indexed winnerTokenId, uint256 prizeAmount);
-    event ChainlinkConfigUpdated(
-        address vrfCoordinator,
-        uint64 subscriptionId,
-        bytes32 keyHash
-    );
     event ReceivedTokens(address indexed from, uint256 amount);
 
     // ============ Errors ============
@@ -131,12 +85,13 @@ contract DomesticCatNFT is ERC721, Ownable {
     error NFTNotOwned();
     error MaxPowerReached();
     error GrandPrizeAlreadyAwarded();
-    error InvalidVRFRequest();
     error TransferFailed();
     error InvalidSVGParams();
+    error RandomnessNotReady();
 
-    /// @notice Constructor
+    // ============ Constructor ============
     /// @param ameowToken Address of the AMeow token contract
+    /// @param svgRegistry Address of the CatSVGRegistry contract
     constructor(
         address ameowToken,
         address svgRegistry
@@ -147,7 +102,7 @@ contract DomesticCatNFT is ERC721, Ownable {
         );
         AMEOW_TOKEN = AMeowToken(ameowToken);
         SVG_REGISTRY = CatSVGRegistry(svgRegistry);
-        _mintFee = 0.01 ether;
+        _mintFee = 0.001 ether;
         _feeRecipient = msg.sender;
         treasury = msg.sender;
     }
@@ -172,6 +127,16 @@ contract DomesticCatNFT is ERC721, Ownable {
         emit FeeRecipientUpdated(old, newRecipient);
     }
 
+    /// @notice Get the current mint fee
+    function getMintFee() external view returns (uint256) {
+        return _mintFee;
+    }
+
+    /// @notice Get the current fee recipient
+    function getFeeRecipient() external view returns (address) {
+        return _feeRecipient;
+    }
+
     /// @notice Update treasury address (only governance/owner)
     /// @param newTreasury New treasury address
     function setTreasury(address newTreasury) external onlyOwner {
@@ -181,71 +146,7 @@ contract DomesticCatNFT is ERC721, Ownable {
         emit TreasuryUpdated(old, newTreasury);
     }
 
-    /// @notice Get current mint fee
-    function getMintFee() external view returns (uint256) {
-        return _mintFee;
-    }
-
-    /// @notice Get fee recipient address
-    function getFeeRecipient() external view returns (address) {
-        return _feeRecipient;
-    }
-
-    // ============ Chainlink VRF Configuration ============
-
-    /// @notice Configure Chainlink VRF v2 settings
-    /// @param _vrfCoordinator VRF Coordinator address
-    /// @param _subscriptionId VRF subscription ID
-    /// @param _keyHash VRF key hash
-    /// @param _linkToken LINK token address
-    function configureVRFv2(
-        address _vrfCoordinator,
-        uint64 _subscriptionId,
-        bytes32 _keyHash,
-        address _linkToken
-    ) external onlyOwner {
-        require(_vrfCoordinator != address(0), ZeroAddress());
-        vrfCoordinator = _vrfCoordinator;
-        vrfSubscriptionId = _subscriptionId;
-        vrfKeyHash = _keyHash;
-        linkToken = _linkToken;
-        useVRFV2_5 = false;
-        emit ChainlinkConfigUpdated(_vrfCoordinator, _subscriptionId, _keyHash);
-    }
-
-    /// @notice Configure Chainlink VRF v2.5 settings (recommended for L2s)
-    /// @param _vrfCoordinator VRF Coordinator address
-    /// @param _subscriptionId VRF subscription ID
-    /// @param _keyHash VRF key hash
-    /// @param _wrapper VRF Wrapper address
-    function configureVRFv2_5(
-        address _vrfCoordinator,
-        uint64 _subscriptionId,
-        bytes32 _keyHash,
-        address _wrapper
-    ) external onlyOwner {
-        require(_vrfCoordinator != address(0), ZeroAddress());
-        vrfCoordinator = _vrfCoordinator;
-        vrfSubscriptionId = _subscriptionId;
-        vrfKeyHash = _keyHash;
-        vrfWrapper = _wrapper;
-        useVRFV2_5 = true;
-        emit ChainlinkConfigUpdated(_vrfCoordinator, _subscriptionId, _keyHash);
-    }
-
-    /// @notice Update VRF callback gas limit
-    /// @param gas New gas limit
-    function setCallbackGasLimit(uint32 gas) external onlyOwner {
-        callbackGasLimit = gas;
-    }
-
-    /// @notice Update VRF request confirmations
-    /// @param confirmations New confirmation count
-    function setRequestConfirmations(uint16 confirmations) external onlyOwner {
-        requestConfirmations = confirmations;
-    }
-
-    // ============ NFT Minting ============
+    // ============ Minting ============
 
     /// @notice Mint a new NFT (caller pays mintFee)
     /// @dev Fee split: portion to treasury, rest stays in contract for grand prize
@@ -268,9 +169,9 @@ contract DomesticCatNFT is ERC721, Ownable {
 
         // Remaining half stays in contract for grand prize
 
-        // If this is the last NFT, trigger grand prize
+        // If this is the last NFT, trigger grand prize draw
         if (_tokenIdCounter == MAX_SUPPLY) {
-            _requestRandomWords();
+            _triggerGrandPrizeDraw();
         }
     }
 
@@ -296,7 +197,7 @@ contract DomesticCatNFT is ERC721, Ownable {
         _tokenIdCounter = startId + quantity;
 
         if (newSupply == MAX_SUPPLY) {
-            _requestRandomWords();
+            _triggerGrandPrizeDraw();
         }
     }
 
@@ -343,108 +244,73 @@ contract DomesticCatNFT is ERC721, Ownable {
         return nftPowerLevel[nftId];
     }
 
-    // ============ Chainlink VRF - Random Words ============
+    // ============ Block-Hash Grand Prize Draw ============
 
-    /// @notice Internal function to request random words for grand prize
-    function _requestRandomWords() internal {
+    /// @notice Internal function to trigger the grand prize random draw.
+    /// @dev Stores the current block number; randomness is materialised lazily in
+    ///      getWinningTokenId() which pulls block hashes AFTER they are confirmed.
+    function _triggerGrandPrizeDraw() internal {
         require(!grandPrizeAwarded, "Already awarded");
-        require(vrfCoordinator != address(0), "VRF not configured");
-
-        uint256 requestId;
-        bool isValidRandomness = false;
-
-        if (useVRFV2_5 && vrfWrapper != address(0)) {
-            // VRF v2.5 (via wrapper) - supported on optimism, arbitrum, etc.
-            isValidRandomness = _requestRandomWordsVRFv2_5();
-        } else {
-            // VRF v2 direct
-            isValidRandomness = _requestRandomWordsVRFv2();
-        }
-
-        require(isValidRandomness, "VRF request failed");
+        lastRandomBlock = block.number;
+        emit GrandPrizeRequested(lastRandomBlock);
     }
 
-    function _requestRandomWordsVRFv2() internal returns (bool success) {
-        try
-            VRFCoordinatorV2Interface(vrfCoordinator).requestRandomWords(
-                vrfKeyHash,
-                vrfSubscriptionId,
-                requestConfirmations,
-                callbackGasLimit,
-                1 // numWords
-            )
-        returns (uint256 requestId) {
-            _vrfRequestToSender[requestId] = msg.sender;
-            emit GrandPrizeRequested(requestId);
-            return true;
-        } catch {
-            return false;
-        }
-    }
+    /// @notice Get the winning token ID using on-chain block-hash randomness.
+    /// @dev Combines:
+    ///        1. XOR of the last 10 block hashes (stored in _recentBlockHashes)
+    ///        2. Contract's ETH balance (adds live entropy)
+    ///        3. Previous winning token ID (chains each draw)
+    ///      Can be called by anyone after lastRandomBlock is set.
+    ///      Reverts if the draw block is not yet confirmed (blockhash == 0x0).
+    /// @return The winning token ID (0 - 9999)
+    function getWinningTokenId() external returns (uint256) {
+        require(lastRandomBlock != 0, "Draw not triggered");
+        require(!grandPrizeAwarded, "Already awarded");
 
-    function _requestRandomWordsVRFv2_5() internal returns (bool success) {
-        try
-            VRFV2PlusWrapperInterface(vrfWrapper).requestRandomness(
-                callbackGasLimit,
-                requestConfirmations,
-                1 // numWords
-            )
-        returns (uint256 requestId) {
-            _vrfRequestToSender[requestId] = msg.sender;
-            emit GrandPrizeRequested(requestId);
-            return true;
-        } catch {
-            return false;
-        }
-    }
-
-    /// @notice Callback function called by Chainlink VRF coordinator
-    /// @param requestId The VRF request ID
-    /// @param randomWords Array of random words
-    function rawFulfillRandomWords(
-        uint256 requestId,
-        uint256[] memory randomWords
-    ) external {
-        require(
-            msg.sender == vrfCoordinator || msg.sender == vrfWrapper,
-            "Only VRF coordinator"
-        );
-        _fulfillRandomWords(requestId, randomWords);
-    }
-
-    /// @notice Internal function to fulfill random words and select winner
-    /// @param requestId The VRF request ID
-    /// @param randomWords Array of random words
-    function _fulfillRandomWords(
-        uint256 requestId,
-        uint256[] memory randomWords
-    ) internal {
-        if (grandPrizeAwarded) return;
-        require(
-            _vrfRequestToSender[requestId] != address(0),
-            InvalidVRFRequest()
-        );
-
-        uint256 randomWord = randomWords[0];
-        uint256 prizePool = address(this).balance;
-
-        // Select winner: random number modulo MAX_SUPPLY
-        winningTokenId = randomWord % MAX_SUPPLY;
+        // Materialise randomness only once
         grandPrizeAwarded = true;
 
-        // Transfer prize to winner
-        address winner = ownerOf(winningTokenId);
-        (bool sent, ) = winner.call{value: prizePool}("");
-        require(sent, TransferFailed());
+        // ---- Entropy source 1: XOR of the 10 stored block hashes ----
+        bytes32 combinedHash = bytes32(0);
+        for (uint8 i = 0; i < 10; i++) {
+            combinedHash ^= _recentBlockHashes[i];
+        }
 
-        emit GrandPrizeAwarded(winningTokenId, prizePool);
+        // ---- Entropy source 2: blockhash of the draw-trigger block ----
+        // Must wait at least 1 block for the trigger block to be confirmed
+        bytes32 drawBlockHash = blockhash(lastRandomBlock);
+        if (drawBlockHash == bytes32(0)) {
+            revert RandomnessNotReady(); // block not yet confirmed
+        }
+        combinedHash ^= drawBlockHash;
+
+        // ---- Entropy source 3: live contract balance ----
+        uint256 entropy = uint256(combinedHash) ^ address(this).balance ^ block.gaslimit;
+
+        // ---- Entropy source 4: previous winner (chains randomness across draws) ----
+        entropy ^= winningTokenId << 144; // spread token ID across high bits
+
+        // ---- Final selection: modulo MAX_SUPPLY ----
+        winningTokenId = entropy % MAX_SUPPLY;
+        uint256 prizeAmount = address(this).balance;
+
+        // ---- Append this block hash to the circular buffer for the NEXT draw ----
+        _recentBlockHashes[_blockHashIndex] = blockhash(block.number);
+        _blockHashIndex = (_blockHashIndex + 1) % 10;
+
+        if (prizeAmount > 0) {
+            (bool sent, ) = ownerOf(winningTokenId).call{value: prizeAmount}("");
+            require(sent, TransferFailed());
+        }
+
+        emit GrandPrizeAwarded(winningTokenId, prizeAmount);
+        return winningTokenId;
     }
 
     // ============ On-Chain SVG Generation ============
 
     /// @notice Get the tokenURI for a given NFT (ERC721 metadata)
-    /// @dev Delegates to SVG_REGISTRY.buildTokenURI() — single external call,
-    ///      eliminates duplicate base64 + attribute building in main contract.
+    /// @dev Delegates to SVG_REGISTRY.buildTokenURI()
     /// @param tokenId The NFT token ID
     /// @return Base64 encoded data URL containing SVG and metadata
     function tokenURI(
@@ -475,7 +341,6 @@ contract DomesticCatNFT is ERC721, Ownable {
     // ============ Withdrawal ============
 
     /// @notice Withdraw token accidentally sent to contract
-    /// @dev Only withdraws token not reserved for grand prize
     function withdraw(address token) external onlyOwner {
         uint256 balance;
         if (token == address(0)) {
@@ -489,10 +354,13 @@ contract DomesticCatNFT is ERC721, Ownable {
     }
 
     // ============ View Functions ============
+
+    /// @notice Total number of NFTs minted
     function totalMinted() external view returns (uint256) {
         return _tokenIdCounter;
     }
 
+    /// @notice Current contract ETH balance (prize pool + any accidental deposits)
     function getContractBalance() external view returns (uint256) {
         return address(this).balance;
     }

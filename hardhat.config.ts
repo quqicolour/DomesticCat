@@ -1,5 +1,6 @@
 import hardhatToolboxViemPlugin from "@nomicfoundation/hardhat-toolbox-viem";
 import { configVariable, defineConfig } from "hardhat/config";
+import { baseSepolia } from "viem/chains";
 
 export default defineConfig({
   plugins: [hardhatToolboxViemPlugin],
@@ -23,11 +24,11 @@ export default defineConfig({
       type: "edr-simulated",
       chainType: "op",
     },
-    sepolia: {
+    baseSepolia: {
       type: "http",
-      chainType: "l1",
+      chainType: "op",
       url: configVariable("SEPOLIA_RPC_URL"),
-      accounts: [configVariable("SEPOLIA_PRIVATE_KEY")],
+      accounts: [configVariable("PRIVATE_KEY")],
     },
   },
 });
